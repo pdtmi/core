@@ -115,4 +115,4 @@ clean:
 	rm -f ${MINER} ${HUB} ${CLI} ${BOOTNODE} ${MARKET}
 
 deb:
-	debuild --preserve-env -uc -us
+	debuild --no-lintian --preserve-env -uc -us -i -I
