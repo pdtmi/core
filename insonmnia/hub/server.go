@@ -71,7 +71,7 @@ type Hub struct {
 
 	// Scheduling.
 	filters []minerFilter
-	consul  *consul.Client
+	consul  Consul
 
 	associatedHubs     map[string]struct{}
 	associatedHubsLock sync.Mutex
@@ -80,8 +80,6 @@ type Hub struct {
 
 	leaderClient     pb.HubClient
 	leaderClientLock sync.Mutex
-
-	stopCh chan struct{}
 }
 
 // Ping should be used as Healthcheck for Hub
@@ -544,12 +542,14 @@ func New(ctx context.Context, cfg *HubConfig, version string) (*Hub, error) {
 		portPool = gateway.NewPortPool(portRangeFrom, portRangeSize)
 	}
 
-	var consulCli *consul.Client = nil
+	var consulCli Consul = nil
 	if cfg.ConsulEnabled {
 		consulCli, err = consul.NewClient(consul.DefaultConfig())
-		if err != nil {
-			return nil, err
-		}
+	} else {
+		consulCli, err = newDevConsul(ctx)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	h := &Hub{
@@ -596,6 +596,12 @@ func (h *Hub) leaderWatch() {
 		if err != nil {
 			break
 		}
+		if kv_pair == nil {
+			time.Sleep(time.Second * 1)
+			log.G(h.ctx).Info("leader key is empty. sleeping for 1 sec")
+			continue
+		}
+		log.G(h.ctx).Info("leader watch: fetched leader", zap.Any("kvpair", kv_pair))
 		log.G(h.ctx).Info("leader watch: fetched leader", zap.String("leader", string(kv_pair.Value)))
 		h.leaderClientLock.Lock()
 		h.leaderClient = nil
@@ -685,7 +691,7 @@ func (h *Hub) election() error {
 		}
 
 		log.G(h.ctx).Info("trying to aquire leader lock")
-		followerCh, err := lock.Lock(h.stopCh)
+		followerCh, err := lock.Lock(nil)
 		if err != nil {
 			log.G(h.ctx).Info("could not acquire leader lock", zap.Error(err))
 			break
@@ -709,11 +715,7 @@ func (h *Hub) election() error {
 // Serve starts handling incoming API gRPC request and communicates
 // with miners
 func (h *Hub) Serve() error {
-	if h.consul != nil {
-		go h.election()
-	} else {
-		h.isLeader = true
-	}
+	go h.election()
 
 	h.startTime = time.Now()
 
@@ -788,7 +790,6 @@ func (h *Hub) Serve() error {
 
 // Close disposes all capabilitiesCurrent attached to the Hub
 func (h *Hub) Close() {
-	h.stopCh <- struct{}{}
 	h.externalGrpc.Stop()
 	h.minerListener.Close()
 	if h.gateway != nil {
